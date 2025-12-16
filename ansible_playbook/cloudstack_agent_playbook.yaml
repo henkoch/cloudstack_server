@@ -1,0 +1,64 @@
+---
+- name: playbook to install a kvm cloudstack agent
+  hosts: localhost
+  tasks:
+    - name: use apt to update its cache
+      become: yes
+      apt:
+        update_cache: yes
+    - name: install setfacl
+      become: yes
+      apt:
+        update_cache: true
+        package: acl
+      # https://linuxhint.com/install-kvm-ubuntu-22-04/
+    - name: set-up kvm
+      become: yes
+      block:
+        - name: install kvm packages
+          become: yes
+          apt:
+            update_cache: true
+            package: ['bridge-utils', 'libvirt-clients', 'libvirt-daemon-system', 'qemu-kvm', 'virtinst']
+    - name: Install cloudstack manager
+      # https://docs.cloudstack.apache.org/en/4.18.0.0/installguide/management-server/index.html#install-mgt
+      block:      
+        - name: install pkgs to allow apt to use a repository over HTTPS
+          become: yes
+          apt:
+            update_cache: true
+            package: ['apt-transport-https', 'ca-certificates', 'curl', 'gnupg2']
+        - name: Add cloudstack keyring
+          become: yes
+          ansible.builtin.apt_key:
+            url: http://download.cloudstack.org/release.asc
+            keyring: /usr/share/keyrings/cloudstack.gpg
+        - name: Add cloudstack repo
+          become: yes
+          # TODO replace '4.18' with a var name
+          ansible.builtin.apt_repository:
+            repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudstack.gpg] http://download.cloudstack.org/ubuntu {{ ansible_distribution_release }} 4.18"
+            state: present
+        - name: install cloudstack-management
+          become: yes
+          apt:
+            update_cache: true
+            package: ['cloudstack-agent', 'ifupdown', 'net-tools']
+        - name: add vmadm user
+          become: yes
+          user:
+            name: "vmadm"
+            comment: "VM administrator"
+            shell: "/usr/bin/bash"
+            append: true
+            create_home: true
+            generate_ssh_key: true
+            groups: kvm, libvirt
+            # cat the .pub file and add it to .ssh
+        - name: add vmadm to sudoers
+          become: yes
+          ansible.builtin.lineinfile:
+            path: /etc/sudoers.d/vmadm
+            line: 'vmadm ALL=(ALL) NOPASSWD:ALL'
+            mode: '0440'
+            create: true

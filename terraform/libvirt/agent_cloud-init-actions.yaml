@@ -1,0 +1,42 @@
+#cloud-config
+
+fqdn: ${vm_hostname}
+
+# Add groups to the system
+groups:
+  - ansible
+
+# Add users to the system. Users are added after groups are added.
+users:
+  - default
+  - name: ansible
+    gecos: ansible
+    shell: /bin/bash
+    primary_group: ansible
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: users, admin
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ${ansible_ssh_public_key}
+
+# install packages
+packages:
+  - ansible
+  - git
+
+# provide the CNI deployment file.
+#  https://cloudinit.readthedocs.io/en/latest/reference/modules.html#write-files
+write_files:
+  - path: /home/ansible/cloudstack_agent_playbook.yaml
+    content: !!binary |
+      ${ansible_playbook_file_base64}
+    permissions: '0640'
+
+# 
+runcmd:
+  - cd /home/ansible
+  - chown -R ansible:ansible /home/ansible
+  - date > DONE.txt
+  - ansible-playbook --extra-vars "mysql_root_password=SuperSecret"  --extra-vars "primary_nfs_storage=/hdd2/primary_nfs_storage" --extra-vars "secondary_nfs_storage=/hdd1/secondary_nfs_storage" -v cloudstack_agent_playbook.yaml
+  - cp /var/log/cloud-init-output.log /home/ansible
+  - date >> DONE.txt

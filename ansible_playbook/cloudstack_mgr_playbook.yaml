@@ -1,0 +1,123 @@
+---
+- name: playbook to install k8s cluster
+  hosts: localhost
+  tasks:
+    - name: use apt to update its cache
+      become: yes
+      apt:
+        update_cache: yes
+    - name: install setfacl
+      become: yes
+      apt:
+        update_cache: true
+        package: acl
+    - name: Install cloudstack manager
+      # https://docs.cloudstack.apache.org/en/4.18.0.0/installguide/management-server/index.html#install-mgt
+      block:      
+        - name: install pkgs to allow apt to use a repository over HTTPS
+          become: yes
+          apt:
+            update_cache: true
+            package: ['apt-transport-https', 'ca-certificates', 'curl', 'gnupg2']
+        - name: Add cloudstack keyring
+          become: yes
+          ansible.builtin.apt_key:
+            url: http://download.cloudstack.org/release.asc
+            keyring: /usr/share/keyrings/cloudstack.gpg
+        - name: Add cloudstack repo
+          become: yes
+          # TODO replace '4.18' with a var name
+          ansible.builtin.apt_repository:
+            repo: "deb [arch=amd64 signed-by=/usr/share/keyrings/cloudstack.gpg] http://download.cloudstack.org/ubuntu {{ ansible_distribution_release }} 4.18"
+            state: present
+        - name: install cloudstack-management
+          become: yes
+          apt:
+            update_cache: true
+            package: cloudstack-management
+    - name: Install mysql locally
+      become: yes
+      # TODO look into this, even if it says ignore error to a single task
+      #        then the block will fail.
+      #      but now the block will also ignore if there is a problem
+      #      with mysql installation :-/
+      ignore_errors: true
+      block:      
+        # python3-pymysql required to set the password
+        - name: install the mysql server pkg
+          apt:
+            update_cache: true
+            package: ['mysql-server', 'python3-pymysql']
+        - name: write /etc/mysql/conf.d/cloudstack.cnf
+          become: yes
+          template:
+            src: cloudstack.cnf.j2
+            dest: /etc/mysql/conf.d/cloudstack.cnf
+          register: mysql_conf
+        - name: restart mysql-server service
+          service:
+            name: mysql
+            state: restarted
+          when: mysql_conf.changed
+          # https://linuxhint.com/set_mysql_root_password_ansible/
+          # ignore the 'mysql -u' errors, since this might be the second run where the password has been set
+        - name: Change the authentication plugin of MySQL root user to mysql_native_password
+          shell: mysql -u root -e 'UPDATE mysql.user SET plugin="mysql_native_password" WHERE user="root" AND host="localhost"'
+          ignore_errors: true
+        - name: Flush Privileges
+          shell: mysql -u root -e 'FLUSH PRIVILEGES'
+          ignore_errors: true
+        - name: Set MySQL root password
+          mysql_user:
+            # only update password if empty password is currently allowed.
+            check_implicit_admin: true
+            login_host: 'localhost'
+            login_user: 'root'
+            name: 'root'
+            password: '{{ mysql_root_password }}'
+            login_password: ''
+            # ignore errors, since I can't it to id the password has been changed.
+            state: present
+          ignore_errors: true
+    - name: Install set up the database for cloudstack
+      become: yes
+      ansible.builtin.command: cloudstack-setup-databases cloud:CloudPassword@localhost --deploy-as=root:{{ mysql_root_password }}
+      # /etc/cloudstack/management/db.properties
+    - name: cloud user does not require tty, in sudoers
+      become: yes
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        line: Defaults:cloud !requiretty
+    - name: finish configuring the OS for the Management Server
+      become: yes
+      ansible.builtin.command: cloudstack-setup-management
+      args:
+        creates: /var/lib/cloudstack/management/.ssh/id_rsa.pub
+    - name: set-up nfs storage
+      become: yes
+      block:
+        - name: install nfs server
+          become: yes
+          apt:
+            update_cache: true
+            package: ['nfs-kernel-server']
+        - name: create primary storage {{ primary_nfs_storage }}
+          ansible.builtin.file:
+            path: '{{ primary_nfs_storage }}'
+            state: directory
+            mode: '0750'
+        - name: add {{ primary_nfs_storage }} /etc/exports
+          ansible.builtin.lineinfile:
+            path: /etc/exports
+            line: '{{ primary_nfs_storage }}  *(rw,async,no_root_squash,no_subtree_check)'
+        - name: create secondary storage {{ secondary_nfs_storage }}
+          ansible.builtin.file:
+            path: '{{ secondary_nfs_storage }}'
+            state: directory
+            mode: '0750'
+        - name: add {{ secondary_nfs_storage }} /etc/exports
+          ansible.builtin.lineinfile:
+            path: /etc/exports
+            line: '{{ secondary_nfs_storage }}  *(rw,async,no_root_squash,no_subtree_check)'
+        - name: ensure all shares are exported
+          ansible.builtin.command: exportfs -a
